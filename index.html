@@ -7,7 +7,6 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;700&family=Russo+One&display=swap" rel="stylesheet">
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <style>
 :root{
@@ -208,6 +207,9 @@ h2{font-size:28px;text-shadow:0 3px 0 #000;margin-bottom:10px}
 @keyframes fall{to{transform:translateY(115vh) rotate(720deg)}}
 .show-m{display:none}
 .blink{animation:blink 1s infinite}
+#netBadge{position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:280;background:#b8322a;color:#fff;padding:6px 14px;border-radius:10px;font-size:14px;box-shadow:0 4px 0 rgba(0,0,0,.4);animation:blink 1.2s infinite;pointer-events:none;max-width:90vw;text-align:center}
+.nettab td{padding:6px;border-bottom:1px solid rgba(255,255,255,.08);font-size:15px}
+@media (pointer:coarse){.slot .card{animation:none}.slot.deal .card{animation:deal .45s cubic-bezier(.2,1.3,.4,1) var(--dd,0s) both}.card.gold::after{animation:none}.logo span{animation:none}}
 @keyframes blink{50%{opacity:.4}}
 @media (max-width:820px){
   :root{--cw:clamp(44px,11.5vw,70px)}
@@ -250,7 +252,9 @@ h2{font-size:28px;text-shadow:0 3px 0 #000;margin-bottom:10px}
       <div class="or">— или войти к друзьям —</div>
       <div class="row"><input id="iCode" maxlength="5" placeholder="КОД" style="text-transform:uppercase;letter-spacing:4px;text-align:center"><button id="bJoin" class="btn b-blue">Войти</button></div>
       <button id="bRules" class="btn b-gray">❓ Как играть</button>
+      <button id="bNet" class="btn b-gray sm">📡 Проверить связь</button>
       <div id="menuMsg"></div>
+      <div id="ver" style="text-align:center;font-size:12px;opacity:.45"></div>
     </div>
   </section>
   <!-- LOBBY -->
@@ -329,7 +333,8 @@ h2{font-size:28px;text-shadow:0 3px 0 #000;margin-bottom:10px}
 <div id="overlay" class="hidden"></div>
 <div id="toasts"></div>
 <div id="announce"></div>
-<div id="topbtns"><button class="btn sm b-gray" id="bSfx">🔊</button><button class="btn sm b-gray" id="bMus">🎵</button></div>
+<div id="netBadge" class="hidden"></div>
+<div id="topbtns"><button class="btn sm b-gray" id="bBg" title="Анимация фона">🌀</button><button class="btn sm b-gray" id="bSfx">🔊</button><button class="btn sm b-gray" id="bMus">🎵</button></div>
 
 <script>
 'use strict';
@@ -533,7 +538,7 @@ class Seat{
     this.souv=null;this.tama={age:0,lose:0};this.nextHandBonus=0;this.crowns=0;this.round=0;this.phase='lobby';
     this.table=[];this.event=null;this.hand=[];this.pile=[];this.score=0;this.done=true;this.saleNext=false;
     this.shop=null;this.rerolls=0;this.hands=0;this.discards=0;this.calc=0;this.seq=0;this.last=null;this.sortMode='rank';
-    this.cactusOpp=0;this.handSize=8;
+    this.cactusOpp=0;this.handSize=8;this.lastEnd=0;
   }
   notify(text,kind){if(!this.isBot)UI.toast(text,kind)}
   changed(){if(this.isBot)this.botSchedule();else UI.renderGame()}
@@ -545,16 +550,17 @@ class Seat{
       case 'reset':this.resetGame();break;
       case 'reject':if(!this.isBot)UI.rejected(m.reason);break;
       case 'souvOffer':
+        if(this.souv)break;
         this.phase='souv';this.table=m.players||this.table;
         if(this.isBot)setTimeout(()=>this.pickSouv(pick(m.options)),700+Math.random()*1500);else UI.souv(m.options);
         break;
       case 'table':this.table=m.players;if(!this.isBot)UI.tableChanged();break;
       case 'status':{const i=this.table.findIndex(p=>p.id===m.p.id);if(i>=0)this.table[i]=m.p;else this.table.push(m.p);if(!this.isBot)UI.renderOpps();break}
-      case 'roundStart':this.startRound(m);break;
+      case 'roundStart':if(m.round<this.round||(m.round===this.round&&this.phase!=='lobby'&&this.phase!=='souv'))break;this.startRound(m);break;
       case 'attack':this.onAttack(m);break;
       case 'gain':this.onGain(m);break;
       case 'feed':if(!this.isBot&&!(m.skip||[]).includes(this.id))UI.toast(m.text,m.kind);break;
-      case 'roundEnd':this.onRoundEnd(m);break;
+      case 'roundEnd':if(m.round===this.lastEnd)break;this.lastEnd=m.round;this.onRoundEnd(m);break;
       case 'readyState':if(!this.isBot)UI.renderReady(m.ready);break;
       case 'oppPlay':if(!this.isBot)UI.oppPlay(m);break;
     }
@@ -563,6 +569,7 @@ class Seat{
   // ---------------- РАУНД
   startRound(m){
     this.phase='round';this.round=m.round;this.event=m.event;this.table=m.players;
+    const meP=m.players.find(p=>p.id===this.id);if(meP&&meP.souv&&!this.souv)this.souv=meP.souv;
     const opps=m.players.filter(p=>p.id!==this.id);
     this.cactusOpp=opps.filter(p=>p.souv==='cactus').length;
     const jblOpp=opps.filter(p=>p.souv==='jbl').length;
@@ -798,7 +805,7 @@ function bestPlay(seat,sloppy){
    ===================================================================== */
 const H={active:false,code:null,players:[],conns:{},bots:{},phase:'lobby',round:0,lastEv:[],offers:{}};
 let ME=null,PEER=null;
-function pub(p){return{id:p.id,name:p.name,avatar:p.avatar,isBot:p.isBot,souv:p.souv,crowns:p.crowns,score:p.score,hands:p.hands,discards:p.discards,money:p.money,done:p.done,ready:p.ready}}
+function pub(p){return{id:p.id,name:p.name,avatar:p.avatar,isBot:p.isBot,souv:p.souv,crowns:p.crowns,score:p.score,hands:p.hands,discards:p.discards,money:p.money,done:p.done,ready:p.ready,offline:!!p.offline}}
 function hostSendTo(id,msg){
   if(ME&&id===ME.id)defer(()=>ME.onMsg(msg));
   else if(H.bots[id])defer(()=>H.bots[id].onMsg(msg));
@@ -851,7 +858,7 @@ function hostStartRound(){
   }
   H.players.forEach(p=>{p.done=false;p.score=0;p.ready=false;p.seq=0});
   H.phase='round';
-  hostBroadcast({t:'roundStart',round:H.round,event:ev,players:hostTable(),tax});
+  H.lastRoundStart={t:'roundStart',round:H.round,event:ev,players:hostTable(),tax};hostBroadcast(H.lastRoundStart);
 }
 function hostEndRound(){
   const max=Math.max(0,...H.players.map(p=>p.score));
@@ -860,7 +867,7 @@ function hostEndRound(){
   const champs=H.players.filter(p=>p.crowns>=3).map(p=>p.id);
   H.phase=champs.length?'over':'shop';
   const results=[...H.players].sort((a,b)=>b.score-a.score).map(pub);
-  hostBroadcast({t:'roundEnd',round:H.round,results,winners,champion:champs.length?champs:null});
+  H.lastRoundEnd={t:'roundEnd',round:H.round,results,winners,champion:champs.length?champs:null};hostBroadcast(H.lastRoundEnd);
 }
 function hostNewGame(){
   H.phase='lobby';H.round=0;
@@ -928,20 +935,24 @@ function hostReject(id,reason){
 }
 
 /* =====================================================================
-   СЕТЬ: PeerJS (P2P) + запасной канал через публичные MQTT-серверы
-   Хост слушает сразу всё: PeerJS и все MQTT-брокеры.
-   Игрок пробует PeerJS, а если не вышло — по очереди MQTT-брокеры.
+   СЕТЬ: только через публичные MQTT-серверы (обычный WebSocket, работает за любым NAT)
+   Хост сидит сразу на всех серверах, игрок — на первом, где нашлась комната.
+   После обрыва игрок сам переподключается и запрашивает у хоста актуальное состояние (resync).
    ===================================================================== */
+const VERSION='v4 · связь через серверы';
 const BROKERS=['wss://broker.emqx.io:8084/mqtt','wss://broker.hivemq.com:8884/mqtt','wss://test.mosquitto.org:8081/mqtt'];
+const BROKER_NAMES=['EMQX','HiveMQ','Mosquitto'];
 const TOPIC=(code,sub)=>'haostro/v1/'+code+'/'+sub;
-const NET={peer:false,mqtt:0,via:'',label(){
-  if(H.active)return 'Связь: '+[this.peer?'P2P':'',this.mqtt?`запасной сервер ×${this.mqtt}`:''].filter(Boolean).join(' + ');
-  return this.via?'Связь: '+this.via:'';
-}};
+const NET={hostBrokers:0,via:'',label(){if(H.active)return `Связь: серверов на линии — ${this.hostBrokers} из ${BROKERS.length}`;return this.via?'Связь: '+this.via:''}};
 function genCode(){const A='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';let s='';for(let i=0;i<5;i++)s+=A[Math.floor(Math.random()*A.length)];return s}
 function rid(){return Math.random().toString(36).slice(2,8)+Math.random().toString(36).slice(2,8)}
+function mqttOk(){if(typeof mqtt==='undefined'){UI.menuMsg('Не загрузилась сетевая библиотека (unpkg.com недоступен?). Проверь интернет или отключи блокировщик.');return false}return true}
+// таймер, который понимает, что вкладка «спала» (браузер тормозит таймеры в фоне)
+function watchdog(ms,fn){let tick=Date.now();return setInterval(()=>{const now=Date.now(),slept=now-tick>ms*3;tick=now;fn(now,slept)},ms)}
+
+// ---------------- ХОСТ
 function createRoom(name){
-  if(typeof Peer==='undefined'&&typeof mqtt==='undefined'){UI.menuMsg('Не загрузились сетевые библиотеки. Проверь интернет / отключи блокировщик.');return}
+  if(!mqttOk())return;
   UI.menuMsg('Открываем казино…');
   const code=genCode();let started=false;
   const start=()=>{
@@ -950,98 +961,141 @@ function createRoom(name){
     ME=new Seat('h',name,false);ME.send=m=>defer(()=>hostHandle('h',m));
     hostAddPlayer('h',name,false);
   };
-  setTimeout(()=>{if(!started)UI.menuMsg('Не получилось открыть комнату: ни один сервер связи не отвечает. Попробуй другой интернет или VPN.')},16000);
-  // --- PeerJS
-  if(typeof Peer!=='undefined'){
-    const peer=new Peer(PREFIX+code,{debug:0});
-    peer.on('open',()=>{PEER=peer;NET.peer=true;start()});
-    peer.on('connection',conn=>{
-      conn.on('open',()=>{H.conns[conn.peer]={kind:'peer',send:m=>{if(conn.open)conn.send(m)},close:()=>conn.close()}});
-      conn.on('data',d=>hostHandle(conn.peer,d));
-      conn.on('close',()=>hostRemove(conn.peer));
-      conn.on('error',()=>hostRemove(conn.peer));
-    });
-    peer.on('error',e=>{console.warn('PeerJS:',e.type);if(e.type==='unavailable-id'||e.type==='network'||e.type==='server-error'||e.type==='socket-error'){if(!NET.peer)try{peer.destroy()}catch(x){}}});
-    peer.on('disconnected',()=>{try{if(!peer.destroyed)peer.reconnect()}catch(e){}});
-  }
-  // --- MQTT (все брокеры сразу)
-  if(typeof mqtt!=='undefined'){
-    BROKERS.forEach(url=>{
-      let counted=false;
-      const cl=mqtt.connect(url,{clientId:'hx_'+code+'_'+rid(),connectTimeout:8000,reconnectPeriod:4000,keepalive:30,clean:true});
-      cl.on('connect',()=>{cl.subscribe(TOPIC(code,'h'),{qos:1},err=>{if(err)return;if(!counted){counted=true;NET.mqtt++}start()})});
-      cl.on('message',(topic,buf)=>{
-        let d;try{d=JSON.parse(buf.toString())}catch(e){return}
-        if(!d||typeof d!=='object'||!d.m||typeof d.m!=='object')return;
-        const id=String(d.from||'').slice(0,24);if(!/^m[a-z0-9]+$/.test(id))return;
-        let c=H.conns[id];
-        if(!c){
-          if(d.m.t!=='join')return;
-          c=H.conns[id]={kind:'mqtt',seen:Date.now(),send:m=>cl.publish(TOPIC(code,'c/'+id),JSON.stringify(m),{qos:1}),close(){}};
-        }
-        c.seen=Date.now();
-        if(d.m.t==='ping'){c.send({t:'pong'});return}
-        if(d.m.t==='bye'){hostRemove(id);delete H.conns[id];return}
-        hostHandle(id,d.m);
-      });
-      cl.on('error',e=>console.warn('MQTT',url,e&&e.message));
-    });
-    // игроки через MQTT, которые пропали, выкидываются
-    // (если вкладка была в фоне и таймер «проспал» — сначала даём игрокам время отозваться)
-    let tick=Date.now();
-    setInterval(()=>{const now=Date.now(),slept=now-tick>15000;tick=now;
-      for(const [id,c] of Object.entries(H.conns)){if(c.kind!=='mqtt')continue;if(slept){c.seen=Math.max(c.seen,now-20000);continue}if(now-c.seen>45000){hostRemove(id);delete H.conns[id]}}},5000);
-  }
+  setTimeout(()=>{if(!started)UI.menuMsg('Не получилось открыть комнату: ни один сервер не отвечает. Нажми «📡 Проверить связь».')},16000);
+  BROKERS.forEach((url,bi)=>{
+    let online=false;
+    const cl=mqtt.connect(url,{clientId:'hx_'+code+'_'+bi+'_'+rid(),clean:true,connectTimeout:8000,reconnectPeriod:3000,keepalive:20});
+    cl.on('connect',()=>cl.subscribe(TOPIC(code,'h'),{qos:1},err=>{if(err)return;if(!online){online=true;NET.hostBrokers++}start()}));
+    cl.on('close',()=>{if(online){online=false;NET.hostBrokers--;if(UI.screen==='lobby')hostLobby()}});
+    cl.on('message',(t,buf)=>hostNetMsg(cl,code,buf));
+    cl.on('error',e=>console.warn('MQTT',url,e&&e.message));
+  });
+  watchdog(5000,hostSweep);
+  addEventListener('beforeunload',()=>{for(const c of Object.values(H.conns))try{c.send({t:'hostgone'})}catch(e){}});
 }
+function hostNetMsg(cl,code,buf){
+  let d;try{d=JSON.parse(buf.toString())}catch(e){return}
+  if(!d||typeof d!=='object'||!d.m||typeof d.m!=='object')return;
+  const id=String(d.from||'').slice(0,24);if(!/^m[a-z0-9]+$/.test(id))return;
+  const t=d.m.t;let c=H.conns[id];
+  const p0=H.players.find(x=>x.id===id);
+  if(t==='lost'){if(p0&&!p0.offline&&H.phase!=='lobby'){p0.offline=true;hostBroadcast({t:'table',players:hostTable()})}return}
+  if(!c){
+    let msg=d.m;
+    if(t==='resync'&&H.phase==='lobby'&&msg.name)msg={t:'join',name:msg.name};
+    if(msg.t!=='join'){
+      if(t==='resync')cl.publish(TOPIC(code,'c/'+id),JSON.stringify({n:0,m:{t:'reject',reason:'Связь пропадала слишком надолго, а игра уже идёт. Дождись следующей партии.'}}),{qos:1});
+      return;
+    }
+    d.m=msg;
+    c=H.conns[id]={kind:'mqtt',seen:Date.now(),last:-1,out:0,cl};
+    c.send=m=>c.cl.publish(TOPIC(code,'c/'+id),JSON.stringify({n:++c.out,m}),{qos:1});
+  }
+  if(d.m.t!=='join')c.cl=cl;   // отвечаем туда, откуда игрок пишет сейчас
+  c.seen=Date.now();
+  if(typeof d.n==='number'){if(d.n<=c.last)return;c.last=d.n}
+  const p=H.players.find(x=>x.id===id);
+  if(p&&p.offline){p.offline=false;hostBroadcast({t:'table',players:hostTable()});if(H.phase!=='lobby')hostFeed(`📶 ${p.name} снова на связи!`,'good',[id])}
+  if(t==='ping'){c.send({t:'pong'});return}
+  if(t==='bye'){if(H.phase==='lobby')hostRemove(id);else if(p){p.offline=true;hostBroadcast({t:'table',players:hostTable()})}return}
+  if(t==='resync'){hostResync(id);return}
+  hostHandle(id,d.m);
+}
+function hostResync(id){
+  const p=H.players.find(x=>x.id===id);if(!p)return;
+  hostSendTo(id,{t:'table',players:hostTable()});
+  if(H.phase==='lobby')hostSendTo(id,{t:'lobby',code:H.code,players:hostTable(),hostId:ME.id});
+  else if(H.phase==='souv'){if(!p.souv)hostSendTo(id,{t:'souvOffer',options:H.offers[id],players:hostTable()})}
+  else if(['round','ending','starting'].includes(H.phase)&&H.lastRoundStart)hostSendTo(id,H.lastRoundStart);
+  else if(['shop','over'].includes(H.phase)&&H.lastRoundEnd){hostSendTo(id,H.lastRoundEnd);hostSendTo(id,{t:'readyState',ready:H.players.filter(x=>x.ready).map(x=>x.id)})}
+}
+function hostSweep(now,slept){
+  let changed=false;
+  for(const [id,c] of Object.entries(H.conns)){
+    if(slept){c.seen=Math.max(c.seen,now-10000);continue}
+    const p=H.players.find(x=>x.id===id),sil=now-c.seen;
+    if(!p){if(sil>60000)delete H.conns[id];continue}
+    if(sil>15000&&!p.offline){p.offline=true;changed=true}
+    if(H.phase==='lobby'&&sil>45000){hostRemove(id);continue}
+    if(sil>60000){
+      if(H.phase==='souv'&&!p.souv){p.souv=(H.offers[id]||[])[0];changed=true;hostFeed(`📴 ${p.name} пропал — сувенир выбран за него.`,'bad');hostCheckProgress()}
+      else if(H.phase==='round'&&!p.done){p.done=true;changed=true;hostFeed(`📴 ${p.name} пропал со связи — его раунд засчитан как есть.`,'bad');hostCheckProgress()}
+      else if(H.phase==='shop'&&!p.ready){p.ready=true;changed=true;hostBroadcast({t:'readyState',ready:H.players.filter(x=>x.ready).map(x=>x.id)});hostCheckProgress()}
+    }
+  }
+  if(changed)hostBroadcast({t:'table',players:hostTable()});
+}
+
+// ---------------- ИГРОК
 function joinRoom(name,code){
+  if(!mqttOk())return;
   code=String(code||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
   if(code.length!==5){UI.menuMsg('Код — это 5 символов. Например: K7QPX');return}
-  if(typeof Peer==='undefined'){joinMqtt(name,code,0);return}
-  UI.menuMsg('Стучимся в комнату '+code+'…');
-  const peer=new Peer({debug:0});let opened=false,fell=false;
-  const fallback=why=>{if(opened||fell)return;fell=true;clearTimeout(to);console.warn('PeerJS не вышло:',why);try{peer.destroy()}catch(e){}joinMqtt(name,code,0)};
-  const to=setTimeout(()=>fallback('timeout'),8000);
-  peer.on('open',()=>{
-    const conn=peer.connect(PREFIX+code,{reliable:true});
-    conn.on('open',()=>{
-      if(fell){try{conn.close()}catch(e){}return}
-      opened=true;clearTimeout(to);PEER=peer;NET.via='P2P';
-      ME=new Seat(peer.id,name,false);ME.send=m=>{try{conn.send(m)}catch(e){}};conn.send({t:'join',name});
+  UI.menuMsg('Ищем комнату '+code+'…');
+  const myId='m'+rid();let chosen=null,outN=0,lastIn=-1,lastHost=Date.now(),dead=false;
+  const clients=[];
+  const tx=(cl,m)=>cl.publish(TOPIC(code,'h'),JSON.stringify({from:myId,n:++outN,m}),{qos:1});
+  ME=new Seat(myId,name,false);
+  const fatal=(t,s)=>{if(dead)return;dead=true;UI.netBadge(false);UI.fatal(t,s)};
+  BROKERS.forEach((url,bi)=>{
+    let first=true;
+    const cl=mqtt.connect(url,{clientId:'hc_'+myId+'_'+bi,clean:true,connectTimeout:8000,reconnectPeriod:3000,keepalive:20,
+      will:{topic:TOPIC(code,'h'),payload:JSON.stringify({from:myId,m:{t:'lost'}}),qos:1,retain:false}});
+    clients.push(cl);
+    cl.on('connect',()=>cl.subscribe(TOPIC(code,'c/'+myId),{qos:1},err=>{
+      if(err||dead)return;
+      if(first){first=false;if(!chosen)tx(cl,{t:'join',name})}
+      else if(cl===chosen){tx(cl,{t:'resync',name,phase:ME.phase,round:ME.round});if(ME.phase!=='lobby')ME.status()}
+    }));
+    cl.on('offline',()=>{if(cl===chosen&&!dead)UI.netBadge(true,'📡 Связь пропала — переподключаемся…')});
+    cl.on('message',(t,buf)=>{
+      if(dead)return;
+      let d;try{d=JSON.parse(buf.toString())}catch(e){return}
+      if(!d||typeof d!=='object'||!d.m)return;
+      if(!chosen){
+        chosen=cl;NET.cl=cl;NET.via='сервер '+BROKER_NAMES[bi];
+        clients.forEach(o=>{if(o!==cl)try{o.end()}catch(e){}});
+        ME.send=m=>tx(cl,m);
+        ME.send({t:'resync',name,phase:ME.phase,round:ME.round});
+        watchdog(4000,(now,slept)=>{
+          if(dead)return;ME.send({t:'ping'});
+          if(slept)lastHost=Math.max(lastHost,now-5000);
+          const sil=now-lastHost;
+          if(sil>15000)UI.netBadge(true,'📡 Хост не отвечает… ждём');
+          if(sil>150000)fatal('Хост пропал 😢','Больше двух минут нет ответа от хоста. Обнови страницу и зайди заново.');
+        });
+        addEventListener('beforeunload',()=>{try{ME.send({t:'bye'})}catch(e){}});
+      }
+      if(cl!==chosen)return;
+      if(typeof d.n==='number'&&d.n>0){if(d.n<=lastIn)return;lastIn=d.n}
+      lastHost=Date.now();UI.netBadge(false);
+      const m=d.m;
+      if(m.t==='pong')return;
+      if(m.t==='hostgone'){fatal('Хост покинул вечеринку 😢','Хост закрыл вкладку. Обнови страницу, чтобы начать заново.');try{cl.end()}catch(e){}return}
+      if(m.t==='reject'){dead=true;UI.netBadge(false);setTimeout(()=>{try{cl.end()}catch(e){}},300)}
+      ME.onMsg(m);
     });
-    conn.on('data',d=>{if(ME)ME.onMsg(d)});
-    conn.on('close',()=>{if(opened)UI.fatal('Хост покинул вечеринку 😢','Связь с комнатой потеряна. Обнови страницу, чтобы начать заново.')});
   });
-  peer.on('error',e=>{if(!opened)fallback(e.type)});
+  setTimeout(()=>{if(!chosen&&!dead){dead=true;clients.forEach(o=>{try{o.end()}catch(e){}});UI.menuMsg('Комната '+code+' не найдена. Проверь код и что хост не закрыл вкладку. Если не помогает — «📡 Проверить связь».')}},12000);
 }
-function joinMqtt(name,code,idx){
-  if(typeof mqtt==='undefined'){UI.menuMsg('Не получилось подключиться: PeerJS недоступен, а запасная библиотека не загрузилась.');return}
-  if(idx>=BROKERS.length){UI.menuMsg('Комната '+code+' не найдена ни на одном сервере. Хост точно не закрыл вкладку? Проверь код.');return}
-  UI.menuMsg(`Пробуем запасной канал ${idx+1}/${BROKERS.length}…`);
-  const myId='m'+rid();let answered=false,dead=false,lastHost=Date.now(),pingT=null;
-  const cl=mqtt.connect(BROKERS[idx],{clientId:'hc_'+myId,connectTimeout:7000,reconnectPeriod:2000,keepalive:30,clean:true,
-    will:{topic:TOPIC(code,'h'),payload:JSON.stringify({from:myId,m:{t:'bye'}}),qos:1,retain:false}});
-  const pub=m=>cl.publish(TOPIC(code,'h'),JSON.stringify({from:myId,m}),{qos:1});
-  const fail=()=>{if(answered||dead)return;dead=true;clearTimeout(to);try{cl.end(true)}catch(e){}joinMqtt(name,code,idx+1)};
-  const to=setTimeout(fail,10000);
-  ME=new Seat(myId,name,false);ME.send=pub;
-  cl.on('connect',()=>{
-    if(dead)return;
-    cl.subscribe(TOPIC(code,'c/'+myId),{qos:1},err=>{if(err)return fail();if(!answered)pub({t:'join',name})});
-  });
-  cl.on('error',()=>{if(!answered)fail()});
-  cl.on('message',(topic,buf)=>{
-    if(dead)return;let m;try{m=JSON.parse(buf.toString())}catch(e){return}
-    lastHost=Date.now();
-    if(!answered){
-      answered=true;clearTimeout(to);NET.via='запасной сервер '+(idx+1);
-      let tick=Date.now();
-      pingT=setInterval(()=>{pub({t:'ping'});const now=Date.now();if(now-tick>15000)lastHost=Math.max(lastHost,now-20000);tick=now;if(now-lastHost>50000){clearInterval(pingT);dead=true;try{cl.end(true)}catch(e){}UI.fatal('Хост покинул вечеринку 😢','Связь с комнатой потеряна. Обнови страницу, чтобы начать заново.')}},4000);
-      addEventListener('beforeunload',()=>{try{pub({t:'bye'})}catch(e){}});
-    }
-    if(m&&m.t==='pong')return;
-    if(m&&m.t==='reject'){dead=true;clearInterval(pingT);setTimeout(()=>{try{cl.end(true)}catch(e){}},300)}
-    ME.onMsg(m);
-  });
+
+// ---------------- ДИАГНОСТИКА
+async function netCheck(){
+  const row=(n,v)=>`<tr><td>${n}</td><td style="text-align:right">${v}</td></tr>`;
+  const show=rows=>UI.overlay(`<h2>📡 Проверка связи</h2><table class="nettab" style="width:100%">${rows}</table>
+    <p style="font-size:13px;opacity:.7;margin-top:10px">Для игры достаточно одного зелёного сервера у каждого игрока (у хоста и у гостя должен совпасть хотя бы один).<br>${esc(VERSION)} · ${esc(navigator.onLine?'онлайн':'офлайн')}</p>
+    <button class="btn b-gray" style="margin-top:12px;width:100%" id="bCl">Закрыть</button>`);
+  const res=BROKERS.map(()=>'⏳ проверяем…');
+  const draw=()=>{show(row('Сетевая библиотека',typeof mqtt!=='undefined'?'✅ загружена':'❌ не загрузилась')+BROKERS.map((u,i)=>row('Сервер '+BROKER_NAMES[i],res[i])).join(''));$('#bCl').onclick=()=>{AU.click();UI.closeOverlay()}};
+  draw();if(typeof mqtt==='undefined')return;
+  await Promise.all(BROKERS.map((u,i)=>new Promise(r=>{
+    const t0=Date.now(),tp='haostro/check/'+rid();let done=false;
+    const fin=v=>{if(done)return;done=true;res[i]=v;try{cl.end(true)}catch(e){}draw();r()};
+    const cl=mqtt.connect(u,{clientId:'hk_'+rid(),connectTimeout:8000,reconnectPeriod:0});
+    cl.on('connect',()=>cl.subscribe(tp,{qos:1},()=>{const t1=Date.now();cl.publish(tp,'ping',{qos:1});cl.on('message',()=>fin(`✅ ${Date.now()-t1} мс (вход ${t1-t0} мс)`))}));
+    cl.on('error',e=>fin('❌ '+(e&&e.message||'ошибка')));
+    setTimeout(()=>fin('❌ не отвечает'),9000);
+  })));
 }
 
 /* =====================================================================
@@ -1124,7 +1178,9 @@ const AU={
    ===================================================================== */
 const BG={
   themes:{menu:[[.86,.24,.3],[.1,.38,.85],[.07,.06,.13]],round:[[.78,.18,.22],[.08,.42,.62],[.05,.09,.12]],shop:[[.12,.62,.45],[.86,.58,.12],[.04,.1,.08]],over:[[.95,.68,.15],[.55,.25,.85],[.12,.04,.15]],souv:[[.55,.3,.9],[.9,.3,.55],[.08,.05,.14]]},
-  cur:null,target:null,speed:1,kick:0,
+  cur:null,target:null,speed:1,kick:0,frame:0,
+  lite:(window.matchMedia&&matchMedia('(pointer:coarse)').matches)||innerWidth<820,
+  anim:store.get('haostro-bg')!=='0',
   init(){
     const c=$('#bg');this.c=c;const gl=c.getContext('webgl',{antialias:false});
     this.cur=JSON.parse(JSON.stringify(this.themes.menu));this.target=this.themes.menu;
@@ -1145,17 +1201,28 @@ const BG={
     this.u={R:gl.getUniformLocation(pr,'R'),T:gl.getUniformLocation(pr,'T'),A:gl.getUniformLocation(pr,'A'),B:gl.getUniformLocation(pr,'B'),C:gl.getUniformLocation(pr,'C')};
     this.resize();addEventListener('resize',()=>this.resize());
     this.t=0;let last=performance.now();
-    const loop=now=>{const dt=Math.min(.05,(now-last)/1000);last=now;this.kick*=.96;this.t+=dt*(this.speed+this.kick*6);this.draw();requestAnimationFrame(loop)};
+    let slow=0,samples=0;const t0=performance.now();
+    const loop=now=>{
+      const raw=now-last,dt=Math.min(.05,raw/1000);last=now;
+      if(!this.anim){if(this.dirty){this.snap();this.draw();this.dirty=false}requestAnimationFrame(loop);return}
+      // авто-заморозка, если устройство не тянет
+      if(now-t0>3000&&!document.hidden&&raw<1000){samples++;if(raw>45)slow++;if(samples>=120){if(slow/samples>.5){this.anim=false;this.dirty=true;UI.toast('🌀 Фон заморожен, чтобы игра не тормозила. Включить обратно — кнопка 🌀.');const b=$('#bBg');if(b)b.style.opacity=.45}samples=0;slow=0}}
+      this.kick*=.96;this.t+=dt*(this.speed+this.kick*6);
+      this.frame++;if(!this.lite||this.frame%2===0)this.draw();
+      requestAnimationFrame(loop);
+    };
     requestAnimationFrame(loop);
   },
-  resize(){const s=4;this.c.width=Math.max(80,Math.floor(innerWidth/s));this.c.height=Math.max(60,Math.floor(innerHeight/s));if(this.gl)this.gl.viewport(0,0,this.c.width,this.c.height)},
+  resize(){const s=this.lite?7:4;this.dirty=true;this.c.width=Math.max(80,Math.floor(innerWidth/s));this.c.height=Math.max(60,Math.floor(innerHeight/s));if(this.gl)this.gl.viewport(0,0,this.c.width,this.c.height)},
   draw(){
     const gl=this.gl;for(let i=0;i<3;i++)for(let j=0;j<3;j++)this.cur[i][j]+=(this.target[i][j]-this.cur[i][j])*.02;
     gl.uniform2f(this.u.R,this.c.width,this.c.height);gl.uniform1f(this.u.T,this.t);
     gl.uniform3fv(this.u.A,this.cur[0]);gl.uniform3fv(this.u.B,this.cur[1]);gl.uniform3fv(this.u.C,this.cur[2]);
     gl.drawArrays(gl.TRIANGLES,0,3);
   },
-  set(n){this.target=this.themes[n]||this.themes.menu},
+  set(n){this.target=this.themes[n]||this.themes.menu;this.dirty=true},
+  snap(){this.cur=JSON.parse(JSON.stringify(this.target))},
+  setAnim(on){this.anim=on;this.dirty=true;store.set('haostro-bg',on?'1':'0')},
   boom(){this.kick=1}
 };
 
@@ -1183,13 +1250,14 @@ const UI={
     this.overlay(`<h2>${esc(t)}</h2><p style="margin:10px 0 16px">${esc(s)}</p><button class="btn b-red big" onclick="location.href=location.pathname">🔄 В главное меню</button>`);
   },
   overlay(html){const o=$('#overlay');o.innerHTML=`<div class="panel ov-box">${html}</div>`;o.classList.remove('hidden')},
+  netBadge(on,text){const b=$('#netBadge');if(!b)return;if(on){b.textContent=text||'📡 Связь пропала…';b.classList.remove('hidden')}else b.classList.add('hidden')},
   closeOverlay(){$('#overlay').classList.add('hidden');$('#overlay').innerHTML=''},
   // ---------------- LOBBY
   lobby(m){
     this.closeOverlay();this.show('lobby');BG.set('menu');
     $('#lCode').textContent=m.code||H.code||'-----';
     const isHost=H.active;
-    $('#lPlayers').innerHTML=m.players.map(p=>`<div class="pl"><span class="av">${p.avatar}</span><span>${esc(p.name)}${p.id===ME.id?' <small style="opacity:.6">(ты)</small>':''}</span><span class="tag2">${p.id==='h'?'👑 хост':p.isBot?'🤖 бот':'игрок'}</span>${isHost&&p.isBot?`<button class="btn sm b-gray" data-kick="${esc(p.id)}">✖</button>`:''}</div>`).join('')+
+    $('#lPlayers').innerHTML=m.players.map(p=>`<div class="pl"><span class="av">${p.avatar}</span><span>${esc(p.name)}${p.id===ME.id?' <small style="opacity:.6">(ты)</small>':''}</span><span class="tag2">${p.offline?'📴 ':''}${p.id==='h'?'👑 хост':p.isBot?'🤖 бот':'игрок'}</span>${isHost&&p.isBot?`<button class="btn sm b-gray" data-kick="${esc(p.id)}">✖</button>`:''}</div>`).join('')+
       Array.from({length:4-m.players.length},()=>`<div class="pl" style="opacity:.35"><span class="av">💺</span><span>Свободное место</span></div>`).join('');
     $('#lPlayers').querySelectorAll('[data-kick]').forEach(b=>b.onclick=()=>{AU.click();hostRemove(b.dataset.kick,true)});
     $('#lHost').classList.toggle('hidden',!isHost);$('#lWait').classList.toggle('hidden',isHost);
@@ -1250,7 +1318,7 @@ const UI={
       const zs=el.querySelector('.zsv');zs.textContent=sv?sv.e:'';zs.title=sv?sv.n+': '+sv.d:'';
       el.querySelector('.crowns').textContent='👑'.repeat(p.crowns||0);
       el.querySelector('.sc').textContent=fmtNum(p.score||0);
-      el.querySelector('.mini').innerHTML=`<span>✋${p.hands??'-'}</span><span>🗑${p.discards??'-'}</span><span>💰${p.money??'-'}</span><span>${p.done?'✅ всё':'🎲 играет'}</span>`;
+      el.querySelector('.mini').innerHTML=`<span>✋${p.hands??'-'}</span><span>🗑${p.discards??'-'}</span><span>💰${p.money??'-'}</span><span>${p.offline?'📴 нет связи':p.done?'✅ всё':'🎲 играет'}</span>`;
       el.onclick=tgt?()=>this.throwAt(p.id,el):null;
     });
   },
@@ -1554,7 +1622,7 @@ function boostEl(e,t){const d=document.createElement('div');d.className='card jo
   const nm=()=>{const n=cleanName($('#iName').value);store.set('haostro-name',n);return n};
   const lock=ms=>{$('#bCreate').disabled=true;$('#bJoin').disabled=true;setTimeout(()=>{if(UI.screen==='menu'){$('#bCreate').disabled=false;$('#bJoin').disabled=false}},ms)};
   $('#bCreate').onclick=()=>{AU.init();AU.click();lock(16000);createRoom(nm())};
-  $('#bJoin').onclick=()=>{AU.init();AU.click();lock(42000);joinRoom(nm(),$('#iCode').value)};
+  $('#bJoin').onclick=()=>{AU.init();AU.click();lock(15000);joinRoom(nm(),$('#iCode').value)};
   $('#iCode').addEventListener('keydown',e=>{if(e.key==='Enter')$('#bJoin').click()});
   $('#bRules').onclick=$('#bRules2').onclick=()=>{AU.init();AU.click();UI.rulesModal()};
   $('#bLevels').onclick=$('#bShopLv').onclick=()=>{AU.click();UI.levelsModal()};
@@ -1563,6 +1631,9 @@ function boostEl(e,t){const d=document.createElement('div');d.className='card jo
     const done=()=>UI.toast('📋 Ссылка скопирована! Кидай друзьям.','good');
     if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(link).then(done,()=>prompt('Скопируй ссылку:',link));else prompt('Скопируй ссылку:',link);
   };
+  $('#ver').textContent=VERSION;
+  $('#bNet').onclick=()=>{AU.init();AU.click();netCheck()};
+  const bgB=$('#bBg');bgB.style.opacity=BG.anim?1:.45;bgB.onclick=()=>{AU.click();BG.setAnim(!BG.anim);bgB.style.opacity=BG.anim?1:.45};
   $('#bBot').onclick=()=>{AU.click();hostAddBot()};
   $('#bStart').onclick=()=>{AU.crown();hostStartGame()};
   $('#bPlay').onclick=()=>UI.doPlay();
