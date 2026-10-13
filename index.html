@@ -8,6 +8,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Rubik:wght@400;500;700&family=Russo+One&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <style>
 :root{
   --panel:rgba(28,40,48,.86);--panel2:rgba(18,26,32,.88);
@@ -264,6 +265,7 @@ h2{font-size:28px;text-shadow:0 3px 0 #000;margin-bottom:10px}
         <button id="bStart" class="btn b-green big">▶ НАЧАТЬ</button>
       </div>
       <div id="lWait" class="blink">Ждём, пока хост нажмёт «Начать»…</div>
+      <div id="lNet" style="font-size:13px;opacity:.6"></div>
     </div>
   </section>
   <!-- SOUVENIR -->
@@ -800,7 +802,7 @@ function pub(p){return{id:p.id,name:p.name,avatar:p.avatar,isBot:p.isBot,souv:p.
 function hostSendTo(id,msg){
   if(ME&&id===ME.id)defer(()=>ME.onMsg(msg));
   else if(H.bots[id])defer(()=>H.bots[id].onMsg(msg));
-  else{const c=H.conns[id];if(c&&c.open){try{c.send(msg)}catch(e){}}}
+  else{const c=H.conns[id];if(c){try{c.send(msg)}catch(e){}}}
 }
 function hostBroadcast(msg){H.players.forEach(p=>hostSendTo(p.id,msg))}
 function hostTable(){return H.players.map(pub)}
@@ -926,50 +928,119 @@ function hostReject(id,reason){
 }
 
 /* =====================================================================
-   СЕТЬ (PeerJS)
+   СЕТЬ: PeerJS (P2P) + запасной канал через публичные MQTT-серверы
+   Хост слушает сразу всё: PeerJS и все MQTT-брокеры.
+   Игрок пробует PeerJS, а если не вышло — по очереди MQTT-брокеры.
    ===================================================================== */
+const BROKERS=['wss://broker.emqx.io:8084/mqtt','wss://broker.hivemq.com:8884/mqtt','wss://test.mosquitto.org:8081/mqtt'];
+const TOPIC=(code,sub)=>'haostro/v1/'+code+'/'+sub;
+const NET={peer:false,mqtt:0,via:'',label(){
+  if(H.active)return 'Связь: '+[this.peer?'P2P':'',this.mqtt?`запасной сервер ×${this.mqtt}`:''].filter(Boolean).join(' + ');
+  return this.via?'Связь: '+this.via:'';
+}};
 function genCode(){const A='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';let s='';for(let i=0;i<5;i++)s+=A[Math.floor(Math.random()*A.length)];return s}
-function peerOk(){if(typeof Peer==='undefined'){UI.menuMsg('Не загрузилась сетевая библиотека PeerJS. Проверь интернет / отключи блокировщик.');return false}return true}
-function createRoom(name,tries=0){
-  if(!peerOk())return;
+function rid(){return Math.random().toString(36).slice(2,8)+Math.random().toString(36).slice(2,8)}
+function createRoom(name){
+  if(typeof Peer==='undefined'&&typeof mqtt==='undefined'){UI.menuMsg('Не загрузились сетевые библиотеки. Проверь интернет / отключи блокировщик.');return}
   UI.menuMsg('Открываем казино…');
-  const code=genCode();
-  const peer=new Peer(PREFIX+code,{debug:1});
-  peer.on('open',()=>{
-    PEER=peer;H.active=true;H.code=code;H.phase='lobby';H.players=[];
+  const code=genCode();let started=false;
+  const start=()=>{
+    if(started){if(UI.screen==='lobby')hostLobby();return}
+    started=true;H.active=true;H.code=code;H.phase='lobby';H.players=[];
     ME=new Seat('h',name,false);ME.send=m=>defer(()=>hostHandle('h',m));
     hostAddPlayer('h',name,false);
-  });
-  peer.on('connection',conn=>{
-    conn.on('open',()=>{H.conns[conn.peer]=conn});
-    conn.on('data',d=>hostHandle(conn.peer,d));
-    conn.on('close',()=>hostRemove(conn.peer));
-    conn.on('error',()=>hostRemove(conn.peer));
-  });
-  peer.on('error',e=>{
-    if(e.type==='unavailable-id'&&tries<4){peer.destroy();createRoom(name,tries+1);return}
-    if(!H.active)UI.menuMsg('Ошибка сети: '+(e.type||e));else UI.toast('⚠️ Сеть: '+(e.type||e),'bad');
-  });
-  peer.on('disconnected',()=>{try{peer.reconnect()}catch(e){}});
+  };
+  setTimeout(()=>{if(!started)UI.menuMsg('Не получилось открыть комнату: ни один сервер связи не отвечает. Попробуй другой интернет или VPN.')},16000);
+  // --- PeerJS
+  if(typeof Peer!=='undefined'){
+    const peer=new Peer(PREFIX+code,{debug:0});
+    peer.on('open',()=>{PEER=peer;NET.peer=true;start()});
+    peer.on('connection',conn=>{
+      conn.on('open',()=>{H.conns[conn.peer]={kind:'peer',send:m=>{if(conn.open)conn.send(m)},close:()=>conn.close()}});
+      conn.on('data',d=>hostHandle(conn.peer,d));
+      conn.on('close',()=>hostRemove(conn.peer));
+      conn.on('error',()=>hostRemove(conn.peer));
+    });
+    peer.on('error',e=>{console.warn('PeerJS:',e.type);if(e.type==='unavailable-id'||e.type==='network'||e.type==='server-error'||e.type==='socket-error'){if(!NET.peer)try{peer.destroy()}catch(x){}}});
+    peer.on('disconnected',()=>{try{if(!peer.destroyed)peer.reconnect()}catch(e){}});
+  }
+  // --- MQTT (все брокеры сразу)
+  if(typeof mqtt!=='undefined'){
+    BROKERS.forEach(url=>{
+      let counted=false;
+      const cl=mqtt.connect(url,{clientId:'hx_'+code+'_'+rid(),connectTimeout:8000,reconnectPeriod:4000,keepalive:30,clean:true});
+      cl.on('connect',()=>{cl.subscribe(TOPIC(code,'h'),{qos:1},err=>{if(err)return;if(!counted){counted=true;NET.mqtt++}start()})});
+      cl.on('message',(topic,buf)=>{
+        let d;try{d=JSON.parse(buf.toString())}catch(e){return}
+        if(!d||typeof d!=='object'||!d.m||typeof d.m!=='object')return;
+        const id=String(d.from||'').slice(0,24);if(!/^m[a-z0-9]+$/.test(id))return;
+        let c=H.conns[id];
+        if(!c){
+          if(d.m.t!=='join')return;
+          c=H.conns[id]={kind:'mqtt',seen:Date.now(),send:m=>cl.publish(TOPIC(code,'c/'+id),JSON.stringify(m),{qos:1}),close(){}};
+        }
+        c.seen=Date.now();
+        if(d.m.t==='ping'){c.send({t:'pong'});return}
+        if(d.m.t==='bye'){hostRemove(id);delete H.conns[id];return}
+        hostHandle(id,d.m);
+      });
+      cl.on('error',e=>console.warn('MQTT',url,e&&e.message));
+    });
+    // игроки через MQTT, которые пропали, выкидываются
+    // (если вкладка была в фоне и таймер «проспал» — сначала даём игрокам время отозваться)
+    let tick=Date.now();
+    setInterval(()=>{const now=Date.now(),slept=now-tick>15000;tick=now;
+      for(const [id,c] of Object.entries(H.conns)){if(c.kind!=='mqtt')continue;if(slept){c.seen=Math.max(c.seen,now-20000);continue}if(now-c.seen>45000){hostRemove(id);delete H.conns[id]}}},5000);
+  }
 }
 function joinRoom(name,code){
-  if(!peerOk())return;
   code=String(code||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
   if(code.length!==5){UI.menuMsg('Код — это 5 символов. Например: K7QPX');return}
+  if(typeof Peer==='undefined'){joinMqtt(name,code,0);return}
   UI.menuMsg('Стучимся в комнату '+code+'…');
-  const peer=new Peer({debug:1});let opened=false;
-  const to=setTimeout(()=>{if(!opened){UI.menuMsg('Не достучались. Проверь код или попроси хоста создать комнату заново.');try{peer.destroy()}catch(e){}}},15000);
-  peer.on('open',id=>{
-    PEER=peer;ME=new Seat(id,name,false);
+  const peer=new Peer({debug:0});let opened=false,fell=false;
+  const fallback=why=>{if(opened||fell)return;fell=true;clearTimeout(to);console.warn('PeerJS не вышло:',why);try{peer.destroy()}catch(e){}joinMqtt(name,code,0)};
+  const to=setTimeout(()=>fallback('timeout'),8000);
+  peer.on('open',()=>{
     const conn=peer.connect(PREFIX+code,{reliable:true});
-    conn.on('open',()=>{opened=true;clearTimeout(to);ME.send=m=>{try{conn.send(m)}catch(e){}};conn.send({t:'join',name})});
-    conn.on('data',d=>ME.onMsg(d));
+    conn.on('open',()=>{
+      if(fell){try{conn.close()}catch(e){}return}
+      opened=true;clearTimeout(to);PEER=peer;NET.via='P2P';
+      ME=new Seat(peer.id,name,false);ME.send=m=>{try{conn.send(m)}catch(e){}};conn.send({t:'join',name});
+    });
+    conn.on('data',d=>{if(ME)ME.onMsg(d)});
     conn.on('close',()=>{if(opened)UI.fatal('Хост покинул вечеринку 😢','Связь с комнатой потеряна. Обнови страницу, чтобы начать заново.')});
   });
-  peer.on('error',e=>{
-    clearTimeout(to);
-    if(e.type==='peer-unavailable')UI.menuMsg('Комната '+code+' не найдена. Хост точно не закрыл вкладку?');
-    else if(!opened)UI.menuMsg('Ошибка сети: '+(e.type||e));
+  peer.on('error',e=>{if(!opened)fallback(e.type)});
+}
+function joinMqtt(name,code,idx){
+  if(typeof mqtt==='undefined'){UI.menuMsg('Не получилось подключиться: PeerJS недоступен, а запасная библиотека не загрузилась.');return}
+  if(idx>=BROKERS.length){UI.menuMsg('Комната '+code+' не найдена ни на одном сервере. Хост точно не закрыл вкладку? Проверь код.');return}
+  UI.menuMsg(`Пробуем запасной канал ${idx+1}/${BROKERS.length}…`);
+  const myId='m'+rid();let answered=false,dead=false,lastHost=Date.now(),pingT=null;
+  const cl=mqtt.connect(BROKERS[idx],{clientId:'hc_'+myId,connectTimeout:7000,reconnectPeriod:2000,keepalive:30,clean:true,
+    will:{topic:TOPIC(code,'h'),payload:JSON.stringify({from:myId,m:{t:'bye'}}),qos:1,retain:false}});
+  const pub=m=>cl.publish(TOPIC(code,'h'),JSON.stringify({from:myId,m}),{qos:1});
+  const fail=()=>{if(answered||dead)return;dead=true;clearTimeout(to);try{cl.end(true)}catch(e){}joinMqtt(name,code,idx+1)};
+  const to=setTimeout(fail,10000);
+  ME=new Seat(myId,name,false);ME.send=pub;
+  cl.on('connect',()=>{
+    if(dead)return;
+    cl.subscribe(TOPIC(code,'c/'+myId),{qos:1},err=>{if(err)return fail();if(!answered)pub({t:'join',name})});
+  });
+  cl.on('error',()=>{if(!answered)fail()});
+  cl.on('message',(topic,buf)=>{
+    if(dead)return;let m;try{m=JSON.parse(buf.toString())}catch(e){return}
+    lastHost=Date.now();
+    if(!answered){
+      answered=true;clearTimeout(to);NET.via='запасной сервер '+(idx+1);
+      let tick=Date.now();
+      pingT=setInterval(()=>{pub({t:'ping'});const now=Date.now();if(now-tick>15000)lastHost=Math.max(lastHost,now-20000);tick=now;if(now-lastHost>50000){clearInterval(pingT);dead=true;try{cl.end(true)}catch(e){}UI.fatal('Хост покинул вечеринку 😢','Связь с комнатой потеряна. Обнови страницу, чтобы начать заново.')}},4000);
+      addEventListener('beforeunload',()=>{try{pub({t:'bye'})}catch(e){}});
+    }
+    if(m&&m.t==='pong')return;
+    if(m&&m.t==='reject'){dead=true;clearInterval(pingT);setTimeout(()=>{try{cl.end(true)}catch(e){}},300)}
+    ME.onMsg(m);
   });
 }
 
@@ -1125,6 +1196,7 @@ const UI={
     $('#bBot').disabled=m.players.length>=4;$('#bStart').disabled=m.players.length<2;
     $('#bStart').textContent=m.players.length<2?'Нужно минимум 2 игрока':'▶ НАЧАТЬ';
     if(isHost)history.replaceState(null,'',location.pathname+'?room='+H.code);
+    $('#lNet').textContent=NET.label();
   },
   // ---------------- SOUVENIR
   souv(opts){
@@ -1480,9 +1552,9 @@ function boostEl(e,t){const d=document.createElement('div');d.className='card jo
   const room=new URLSearchParams(location.search).get('room');
   if(room){$('#iCode').value=room.toUpperCase().slice(0,5);UI.menuMsg('Тебя позвали в комнату '+room.toUpperCase()+'! Впиши имя и жми «Войти».');$('#bJoin').classList.add('blink')}
   const nm=()=>{const n=cleanName($('#iName').value);store.set('haostro-name',n);return n};
-  const lock=()=>{$('#bCreate').disabled=true;$('#bJoin').disabled=true;setTimeout(()=>{if(UI.screen==='menu'){$('#bCreate').disabled=false;$('#bJoin').disabled=false}},5000)};
-  $('#bCreate').onclick=()=>{AU.init();AU.click();lock();createRoom(nm())};
-  $('#bJoin').onclick=()=>{AU.init();AU.click();lock();joinRoom(nm(),$('#iCode').value)};
+  const lock=ms=>{$('#bCreate').disabled=true;$('#bJoin').disabled=true;setTimeout(()=>{if(UI.screen==='menu'){$('#bCreate').disabled=false;$('#bJoin').disabled=false}},ms)};
+  $('#bCreate').onclick=()=>{AU.init();AU.click();lock(16000);createRoom(nm())};
+  $('#bJoin').onclick=()=>{AU.init();AU.click();lock(42000);joinRoom(nm(),$('#iCode').value)};
   $('#iCode').addEventListener('keydown',e=>{if(e.key==='Enter')$('#bJoin').click()});
   $('#bRules').onclick=$('#bRules2').onclick=()=>{AU.init();AU.click();UI.rulesModal()};
   $('#bLevels').onclick=$('#bShopLv').onclick=()=>{AU.click();UI.levelsModal()};
